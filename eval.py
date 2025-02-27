@@ -1205,7 +1205,10 @@ def get_official_eval_result_by_distance_and_difficulty(gt_annos, dt_annos, curr
                 compute_aos = True
             break
 
+    # 結果を格納する辞書
     ret_dict = {}
+    
+    # 各クラスについて評価
     for j, curcls in enumerate(current_classes):
         # 各距離範囲ごとに評価
         for distance_range in range(9):  # 0-8: 0-10m, 10-20m, ..., >80m
@@ -1229,7 +1232,39 @@ def get_official_eval_result_by_distance_and_difficulty(gt_annos, dt_annos, curr
                     ret_dict['%s_aos_%s_%s' % (class_to_name[curcls], distance_str, difficulty)] = mAPaos[0, i, 0]
                     ret_dict['%s_aos_%s_%s_R40' % (class_to_name[curcls], distance_str, difficulty)] = mAPaos_R40[0, i, 0]
 
-    return result, ret_dict
+    # 出力を整形するための新しい辞書
+    formatted_dict = {}
+    
+    # 評価指標とR40のリスト
+    metrics = ['3d', 'bev', 'image', 'aos']
+    r40_suffixes = ['', '_R40']
+    
+    # 各クラスについて
+    for j, curcls in enumerate(current_classes):
+        class_name = class_to_name[curcls]
+        
+        # 各評価指標について
+        for metric in metrics:
+            # 通常とR40の両方について
+            for r40_suffix in r40_suffixes:
+                # 各難易度について
+                for difficulty in difficulty_str:
+                    # 各距離範囲について結果を収集
+                    for distance_range in range(9):
+                        distance_str = '%d-%dm' % (distance_range*10, (distance_range+1)*10) if distance_range < 8 else '>80m'
+                        
+                        # キーを構築
+                        key = '%s_%s_%s_%s%s' % (class_name, metric, distance_str, difficulty, r40_suffix)
+                        
+                        # aosの場合、compute_aosがFalseの場合はスキップ
+                        if metric == 'aos' and not compute_aos:
+                            continue
+                            
+                        # 元の辞書からデータを取得
+                        if key in ret_dict:
+                            formatted_dict[key] = ret_dict[key]
+    
+    return result, formatted_dict
 def get_coco_eval_result(gt_annos, dt_annos, current_classes):
     class_to_name = {
         0: 'Car',

@@ -2,7 +2,7 @@ import time
 import fire
 
 import kitti_common as kitti
-from eval import get_official_eval_result_by_distance, get_official_eval_result, get_coco_eval_result
+from eval import get_official_eval_result_by_distance, get_official_eval_result, get_coco_eval_result, get_official_eval_result_by_distance_and_difficulty
 
 
 def _read_imageset_file(path):
@@ -22,11 +22,13 @@ def printer_decorator(func):
                     print(kw,':',r[kw])
 
     def printer(*args, **kwargs):
-        default_res, distance_res = func(*args, **kwargs)
+        default_res, distance_res, distance_difficulty_res = func(*args, **kwargs)
         print("--------------- RESULTS by DIFFICULTY ---------------")
         print_results(default_res)
         print("---------------  RESULTS by DISTANCE  ---------------")
         print_results(distance_res)
+        print("---------------  RESULTS by DISTANCE and DIFFICULTY  ---------------")
+        print_results(distance_difficulty_res)
 
     return printer
 
@@ -45,7 +47,11 @@ def evaluate(label_path,
     if coco:
         return get_coco_eval_result(gt_annos, dt_annos, current_class)
     else:
-        return [get_official_eval_result(gt_annos, dt_annos, current_class), get_official_eval_result_by_distance(gt_annos, dt_annos, current_class)]
+        return [
+            get_official_eval_result(gt_annos, dt_annos, current_class), 
+            get_official_eval_result_by_distance(gt_annos, dt_annos, current_class),
+            get_official_eval_result_by_distance_and_difficulty(gt_annos, dt_annos, current_class)
+        ]
 
 
 

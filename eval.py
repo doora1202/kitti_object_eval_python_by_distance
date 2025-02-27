@@ -157,6 +157,79 @@ def clean_data_by_distance(gt_anno, dt_anno, current_class, difficulty):
 
     return num_valid_gt, ignored_gt, ignored_dt, dc_bboxes
 
+def clean_data_by_distance_and_difficulty(gt_anno, dt_anno, current_class, distance_range, difficulty):
+    CLASS_NAMES = ['car', 'pedestrian', 'cyclist', 'van', 'person_sitting', 'truck']
+    MAX_TRUNCATION = [0.15, 0.3, 0.5]
+    MAX_OCCLUSION = [0, 1, 2]
+    MIN_HEIGHT = [40, 25, 25]
+    MAX_DISTANCE = [10,20,30,40,50,60,70,80,999]
+    dc_bboxes, ignored_gt, ignored_dt = [], [], []
+    current_cls_name = CLASS_NAMES[current_class].lower()
+    num_gt = len(gt_anno["name"])
+    num_dt = len(dt_anno["name"])
+    num_valid_gt = 0
+    for i in range(num_gt):
+        bbox = gt_anno["bbox"][i]
+        gt_name = gt_anno["name"][i].lower()
+        height = bbox[3] - bbox[1]
+        valid_class = -1
+        if (gt_name == current_cls_name):
+            valid_class = 1
+        elif (current_cls_name == "Pedestrian".lower()
+              and "Person_sitting".lower() == gt_name):
+            valid_class = 0
+        elif (current_cls_name == "Car".lower() and "Van".lower() == gt_name):
+            valid_class = 0
+        else:
+            valid_class = -1
+        ignore = False
+
+        # 距離の計算
+        dis = np.linalg.norm(gt_anno["location"][i])
+        
+        # 距離範囲のチェック
+        if distance_range == 8:  # >80m
+            if dis <= MAX_DISTANCE[distance_range-1]:
+                ignore = True
+        elif distance_range == 0:  # 0-10m
+            if dis > MAX_DISTANCE[distance_range]:
+                ignore = True
+        else:  # 10-20m, 20-30m, ...
+            if dis > MAX_DISTANCE[distance_range] or dis <= MAX_DISTANCE[distance_range-1]:
+                ignore = True
+                
+        # 難易度のチェック
+        if ((gt_anno["occluded"][i] > MAX_OCCLUSION[difficulty])
+                or (gt_anno["truncated"][i] > MAX_TRUNCATION[difficulty])
+                or (height <= MIN_HEIGHT[difficulty])):
+            ignore = True
+
+        if valid_class == 1 and not ignore:
+            ignored_gt.append(0)
+            num_valid_gt += 1
+        elif (valid_class == 0 or (ignore and (valid_class == 1))):
+            ignored_gt.append(1)
+        else:
+            ignored_gt.append(-1)
+            
+        if gt_anno["name"][i] == "DontCare":
+            dc_bboxes.append(gt_anno["bbox"][i])
+            
+    for i in range(num_dt):
+        if (dt_anno["name"][i].lower() == current_cls_name):
+            valid_class = 1
+        else:
+            valid_class = -1
+        height = abs(dt_anno["bbox"][i, 3] - dt_anno["bbox"][i, 1])
+        if height < MIN_HEIGHT[difficulty]:
+            ignored_dt.append(1)
+        elif valid_class == 1:
+            ignored_dt.append(0)
+        else:
+            ignored_dt.append(-1)
+
+    return num_valid_gt, ignored_gt, ignored_dt, dc_bboxes
+
 
 @numba.jit(nopython=True)
 def image_box_overlap(boxes, query_boxes, criterion=-1):
@@ -520,6 +593,36 @@ def _prepare_data(gt_annos, dt_annos, current_class, difficulty, DIForDIS=True):
     return (gt_datas_list, dt_datas_list, ignored_gts, ignored_dets, dontcares,
             total_dc_num, total_num_valid_gt)
 
+def _prepare_data_by_distance_and_difficulty(gt_annos, dt_annos, current_class, distance_range, difficulty):
+    gt_datas_list = []
+    dt_datas_list = []
+    total_dc_num = []
+    ignored_gts, ignored_dets, dontcares = [], [], []
+    total_num_valid_gt = 0
+    for i in range(len(gt_annos)):
+        rets = clean_data_by_distance_and_difficulty(gt_annos[i], dt_annos[i], current_class, distance_range, difficulty)
+        num_valid_gt, ignored_gt, ignored_det, dc_bboxes = rets
+        ignored_gts.append(np.array(ignored_gt, dtype=np.int64))
+        ignored_dets.append(np.array(ignored_det, dtype=np.int64))
+        if len(dc_bboxes) == 0:
+            dc_bboxes = np.zeros((0, 4)).astype(np.float64)
+        else:
+            dc_bboxes = np.stack(dc_bboxes, 0).astype(np.float64)
+        total_dc_num.append(dc_bboxes.shape[0])
+        dontcares.append(dc_bboxes)
+        total_num_valid_gt += num_valid_gt
+        gt_datas = np.concatenate(
+            [gt_annos[i]["bbox"], gt_annos[i]["alpha"][..., np.newaxis]], 1)
+        dt_datas = np.concatenate([
+            dt_annos[i]["bbox"], dt_annos[i]["alpha"][..., np.newaxis],
+            dt_annos[i]["score"][..., np.newaxis]
+        ], 1)
+        gt_datas_list.append(gt_datas)
+        dt_datas_list.append(dt_datas)
+    total_dc_num = np.stack(total_dc_num, axis=0)
+    return (gt_datas_list, dt_datas_list, ignored_gts, ignored_dets, dontcares,
+            total_dc_num, total_num_valid_gt)
+
 
 def eval_class(gt_annos,
                dt_annos,
@@ -829,6 +932,156 @@ def get_official_eval_result(gt_annos, dt_annos, current_classes, PR_detail_dict
 
     return result, ret_dict
 
+def eval_class_by_distance_and_difficulty(gt_annos,
+                                         dt_annos,
+                                         current_classes,
+                                         distance_range,
+                                         difficultys,
+                                         metric,
+                                         min_overlaps,
+                                         compute_aos=False,
+                                         num_parts=50):
+    """Kitti eval with both distance range and difficulty.
+    Args:
+        gt_annos: dict, must from get_label_annos() in kitti_common.py
+        dt_annos: dict, must from get_label_annos() in kitti_common.py
+        current_classes: list of int, 0: car, 1: pedestrian, 2: cyclist
+        distance_range: int, distance range index (0-8)
+        difficultys: list of int. eval difficulty, 0: easy, 1: normal, 2: hard
+        metric: eval type. 0: bbox, 1: bev, 2: 3d
+        min_overlaps: float, min overlap. format: [num_overlap, metric, class].
+        num_parts: int. a parameter for fast calculate algorithm
+    Returns:
+        dict of recall, precision and aos
+    """
+    assert len(gt_annos) == len(dt_annos)
+    num_examples = len(gt_annos)
+    split_parts = get_split_parts(num_examples, num_parts)
+
+    rets = calculate_iou_partly(dt_annos, gt_annos, metric, num_parts)
+    overlaps, parted_overlaps, total_dt_num, total_gt_num = rets
+    N_SAMPLE_PTS = 41
+    num_minoverlap = len(min_overlaps)
+    num_class = len(current_classes)
+    num_difficulty = len(difficultys)
+    precision = np.zeros(
+        [num_class, num_difficulty, num_minoverlap, N_SAMPLE_PTS])
+    recall = np.zeros(
+        [num_class, num_difficulty, num_minoverlap, N_SAMPLE_PTS])
+    aos = np.zeros([num_class, num_difficulty, num_minoverlap, N_SAMPLE_PTS])
+    for m, current_class in enumerate(current_classes):
+        for l, difficulty in enumerate(difficultys):
+            rets = _prepare_data_by_distance_and_difficulty(gt_annos, dt_annos, current_class, distance_range, difficulty)
+            (gt_datas_list, dt_datas_list, ignored_gts, ignored_dets,
+             dontcares, total_dc_num, total_num_valid_gt) = rets
+            for k, min_overlap in enumerate(min_overlaps[:, metric, m]):
+                thresholdss = []
+                for i in range(len(gt_annos)):
+                    rets = compute_statistics_jit(
+                        overlaps[i],
+                        gt_datas_list[i],
+                        dt_datas_list[i],
+                        ignored_gts[i],
+                        ignored_dets[i],
+                        dontcares[i],
+                        metric,
+                        min_overlap=min_overlap,
+                        thresh=0.0,
+                        compute_fp=False)
+                    tp, fp, fn, similarity, thresholds = rets
+                    thresholdss += thresholds.tolist()
+                thresholdss = np.array(thresholdss)
+                thresholds = get_thresholds(thresholdss, total_num_valid_gt)
+                thresholds = np.array(thresholds)
+                pr = np.zeros([len(thresholds), 4])
+                idx = 0
+                for j, num_part in enumerate(split_parts):
+                    gt_datas_part = np.concatenate(
+                        gt_datas_list[idx:idx + num_part], 0)
+                    dt_datas_part = np.concatenate(
+                        dt_datas_list[idx:idx + num_part], 0)
+                    dc_datas_part = np.concatenate(
+                        dontcares[idx:idx + num_part], 0)
+                    ignored_dets_part = np.concatenate(
+                        ignored_dets[idx:idx + num_part], 0)
+                    ignored_gts_part = np.concatenate(
+                        ignored_gts[idx:idx + num_part], 0)
+                    fused_compute_statistics(
+                        parted_overlaps[j],
+                        pr,
+                        total_gt_num[idx:idx + num_part],
+                        total_dt_num[idx:idx + num_part],
+                        total_dc_num[idx:idx + num_part],
+                        gt_datas_part,
+                        dt_datas_part,
+                        dc_datas_part,
+                        ignored_gts_part,
+                        ignored_dets_part,
+                        metric,
+                        min_overlap=min_overlap,
+                        thresholds=thresholds,
+                        compute_aos=compute_aos)
+                    idx += num_part
+                for i in range(len(thresholds)):
+                    recall[m, l, k, i] = pr[i, 0] / (pr[i, 0] + pr[i, 2])
+                    precision[m, l, k, i] = pr[i, 0] / (pr[i, 0] + pr[i, 1])
+                    if compute_aos:
+                        aos[m, l, k, i] = pr[i, 3] / (pr[i, 0] + pr[i, 1])
+                for i in range(len(thresholds)):
+                    precision[m, l, k, i] = np.max(
+                        precision[m, l, k, i:], axis=-1)
+                    recall[m, l, k, i] = np.max(recall[m, l, k, i:], axis=-1)
+                    if compute_aos:
+                        aos[m, l, k, i] = np.max(aos[m, l, k, i:], axis=-1)
+    ret_dict = {
+        "recall": recall,
+        "precision": precision,
+        "orientation": aos,
+    }
+    return ret_dict
+
+def do_eval_by_distance_and_difficulty(gt_annos,
+                                      dt_annos,
+                                      current_classes,
+                                      distance_range,
+                                      min_overlaps,
+                                      compute_aos=False,
+                                      PR_detail_dict=None):
+    # min_overlaps: [num_minoverlap, metric, num_class]
+    difficultys = [0, 1, 2]  # easy, moderate, hard
+    ret = eval_class_by_distance_and_difficulty(gt_annos, dt_annos, current_classes, distance_range, difficultys, 0,
+                     min_overlaps, compute_aos)
+    # ret: [num_class, num_diff, num_minoverlap, num_sample_points]
+    mAP_bbox = get_mAP(ret["precision"])
+    mAP_bbox_R40 = get_mAP_R40(ret["precision"])
+
+    if PR_detail_dict is not None:
+        PR_detail_dict['bbox'] = ret['precision']
+
+    mAP_aos = mAP_aos_R40 = None
+    if compute_aos:
+        mAP_aos = get_mAP(ret["orientation"])
+        mAP_aos_R40 = get_mAP_R40(ret["orientation"])
+
+        if PR_detail_dict is not None:
+            PR_detail_dict['aos'] = ret['orientation']
+
+    ret = eval_class_by_distance_and_difficulty(gt_annos, dt_annos, current_classes, distance_range, difficultys, 1,
+                     min_overlaps)
+    mAP_bev = get_mAP(ret["precision"])
+    mAP_bev_R40 = get_mAP_R40(ret["precision"])
+
+    if PR_detail_dict is not None:
+        PR_detail_dict['bev'] = ret['precision']
+
+    ret = eval_class_by_distance_and_difficulty(gt_annos, dt_annos, current_classes, distance_range, difficultys, 2,
+                     min_overlaps)
+    mAP_3d = get_mAP(ret["precision"])
+    mAP_3d_R40 = get_mAP_R40(ret["precision"])
+    if PR_detail_dict is not None:
+        PR_detail_dict['3d'] = ret['precision']
+    return mAP_bbox, mAP_bev, mAP_3d, mAP_aos, mAP_bbox_R40, mAP_bev_R40, mAP_3d_R40, mAP_aos_R40
+
 def get_official_eval_result_by_distance(gt_annos, dt_annos, current_classes, PR_detail_dict=None):
     print("Evaluating kitti by distance")
     overlap_0_7 = np.array([[0.7, 0.5, 0.5, 0.7,
@@ -911,6 +1164,70 @@ def get_official_eval_result_by_distance(gt_annos, dt_annos, current_classes, PR
                 for i in range(8):
                     ret_dict['%s_image_%d-%dm_R40' % (class_to_name[curcls], i*10, (i+1)*10)] = mAPbbox_R40[j, i, 0]
                 ret_dict['%s_image_>80m' % class_to_name[curcls]] = mAPbbox_R40[j, 8, 0]
+
+    return result, ret_dict
+
+def get_official_eval_result_by_distance_and_difficulty(gt_annos, dt_annos, current_classes, PR_detail_dict=None):
+    print("Evaluating kitti by distance and difficulty")
+    overlap_0_7 = np.array([[0.7, 0.5, 0.5, 0.7,
+                             0.5, 0.7], [0.7, 0.5, 0.5, 0.7, 0.5, 0.7],
+                            [0.7, 0.5, 0.5, 0.7, 0.5, 0.7]])
+    overlap_0_5 = np.array([[0.7, 0.5, 0.5, 0.7,
+                             0.5, 0.5], [0.5, 0.25, 0.25, 0.5, 0.25, 0.5],
+                            [0.5, 0.25, 0.25, 0.5, 0.25, 0.5]])
+    min_overlaps = np.stack([overlap_0_7, overlap_0_5], axis=0)  # [2, 3, 5]
+    class_to_name = {
+        0: 'Car',
+        1: 'Pedestrian',
+        2: 'Cyclist',
+        3: 'Van',
+        4: 'Person_sitting',
+        5: 'Truck'
+    }
+    difficulty_str = ['easy', 'moderate', 'hard']
+    name_to_class = {v: n for n, v in class_to_name.items()}
+    if not isinstance(current_classes, (list, tuple)):
+        current_classes = [current_classes]
+    current_classes_int = []
+    for curcls in current_classes:
+        if isinstance(curcls, str):
+            current_classes_int.append(name_to_class[curcls])
+        else:
+            current_classes_int.append(curcls)
+    current_classes = current_classes_int
+    min_overlaps = min_overlaps[:, :, current_classes]
+    result = ''
+    # check whether alpha is valid
+    compute_aos = False
+    for anno in dt_annos:
+        if anno['alpha'].shape[0] != 0:
+            if anno['alpha'][0] != -10:
+                compute_aos = True
+            break
+
+    ret_dict = {}
+    for j, curcls in enumerate(current_classes):
+        # 各距離範囲ごとに評価
+        for distance_range in range(9):  # 0-8: 0-10m, 10-20m, ..., >80m
+            distance_str = '%d-%dm' % (distance_range*10, (distance_range+1)*10) if distance_range < 8 else '>80m'
+            
+            # 各距離範囲ごとに難易度別の評価を行う
+            mAPbbox, mAPbev, mAP3d, mAPaos, mAPbbox_R40, mAPbev_R40, mAP3d_R40, mAPaos_R40 = do_eval_by_distance_and_difficulty(
+                gt_annos, dt_annos, [current_classes[j]], distance_range, min_overlaps, compute_aos, PR_detail_dict)
+            
+            # 結果を辞書に格納
+            for i, difficulty in enumerate(difficulty_str):
+                ret_dict['%s_3d_%s_%s' % (class_to_name[curcls], distance_str, difficulty)] = mAP3d[0, i, 0]
+                ret_dict['%s_bev_%s_%s' % (class_to_name[curcls], distance_str, difficulty)] = mAPbev[0, i, 0]
+                ret_dict['%s_image_%s_%s' % (class_to_name[curcls], distance_str, difficulty)] = mAPbbox[0, i, 0]
+                
+                ret_dict['%s_3d_%s_%s_R40' % (class_to_name[curcls], distance_str, difficulty)] = mAP3d_R40[0, i, 0]
+                ret_dict['%s_bev_%s_%s_R40' % (class_to_name[curcls], distance_str, difficulty)] = mAPbev_R40[0, i, 0]
+                ret_dict['%s_image_%s_%s_R40' % (class_to_name[curcls], distance_str, difficulty)] = mAPbbox_R40[0, i, 0]
+                
+                if compute_aos:
+                    ret_dict['%s_aos_%s_%s' % (class_to_name[curcls], distance_str, difficulty)] = mAPaos[0, i, 0]
+                    ret_dict['%s_aos_%s_%s_R40' % (class_to_name[curcls], distance_str, difficulty)] = mAPaos_R40[0, i, 0]
 
     return result, ret_dict
 def get_coco_eval_result(gt_annos, dt_annos, current_classes):

@@ -2,6 +2,7 @@
 # KITTIのCAR_3D_R40の各難易度ごとに10m刻みでインスタンス数をカウントするスクリプト
 import os
 import glob
+import math
 
 def get_bucket(distance):
     try:
@@ -49,7 +50,13 @@ def parse_labels(label_file):
                 continue
             bbox_height = bbox_bottom - bbox_top
             # Location: index 11: x, 12: y, 13: z
-            distance = fields[13]
+            try:
+                x = float(fields[11])
+                y = float(fields[12])
+                z = float(fields[13])
+                distance = math.sqrt(x*x + y*y + z*z)
+            except:
+                continue
             difficulty = get_difficulty(bbox_height, occlusion, truncation)
             if difficulty is None:
                 continue

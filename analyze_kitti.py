@@ -67,17 +67,20 @@ def parse_labels(label_file):
     return objects
 
 def main():
-    # Read validation set image IDs from val.txt
-    val_file_path = "/work/iplab/staff.lyra/doora/VirConv/data/kitti/ImageSets/val.txt"
+    import argparse
+    parser = argparse.ArgumentParser(description="Count KITTI Car_3d objects by difficulty and distance bucket")
+    parser.add_argument("--val_file", type=str, required=True, help="Path to val.txt file")
+    parser.add_argument("--label_dir", type=str, required=True, help="Path to KITTI label directory")
+    args = parser.parse_args()
+    # Read validation set image IDs from provided file
     val_ids = set()
-    with open(val_file_path, 'r') as f:
+    with open(args.val_file, 'r') as f:
         for line in f:
             line = line.strip()
             if line:
                 val_ids.add(line)
                 
-    label_dir = "/work/iplab/staff.lyra/doora/VirConv/data/kitti/training/label_2"
-    label_files = glob.glob(os.path.join(label_dir, "*.txt"))
+    label_files = glob.glob(os.path.join(args.label_dir, "*.txt"))
     
     counts_train = {}
     counts_val = {}

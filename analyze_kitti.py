@@ -63,7 +63,7 @@ def parse_labels(label_file):
             bucket = get_bucket(distance)
             if bucket is None:
                 continue
-            objects.append((bucket, difficulty))
+            objects.append((bucket, difficulty, distance))
     return objects
 
 def main():
@@ -84,19 +84,26 @@ def main():
     
     counts_train = {}
     counts_val = {}
+
+    summary_train = {"easy": [0.0, 0], "moderate": [0.0, 0], "hard": [0.0, 0]}
+    summary_val = {"easy": [0.0, 0], "moderate": [0.0, 0], "hard": [0.0, 0]}
     
     for label_file in label_files:
         base = os.path.basename(label_file)
         file_id = os.path.splitext(base)[0]
         is_val = file_id in val_ids
         objs = parse_labels(label_file)
-        for bucket, difficulty in objs:
+        for bucket, difficulty, distance in objs:
             # Count only Car_3d keys with _R40 suffix
             key = f"Car_3d_{bucket}_{difficulty}_R40"
             if is_val:
                 counts_val[key] = counts_val.get(key, 0) + 1
+                summary_val[difficulty][0] += distance
+                summary_val[difficulty][1] += 1
             else:
                 counts_train[key] = counts_train.get(key, 0) + 1
+                summary_train[difficulty][0] += distance
+                summary_train[difficulty][1] += 1
                 
     def print_grouped_counts(counts, set_name):
         print(f"{set_name} Set Counts:")
@@ -124,6 +131,49 @@ def main():
     
     print_grouped_counts(counts_train, "Train")
     print_grouped_counts(counts_val, "Val")
+    
+    def print_summary(summary, set_name):
+        print(f"{set_name} Summary:")
+        for diff in ["easy", "moderate", "hard"]:
+            total_distance, count = summary[diff]
+            avg = total_distance/count if count else 0
+            print(f"  {diff.capitalize()}: Total GT = {count}, Average Distance = {avg:.2f}m")
+    
+    print_summary(summary_train, "Train")
+    print_summary(summary_val, "Val")
+    
+    import matplotlib.pyplot as plt
+
+    def bucket_key(bucket):
+        try:
+            return int(bucket.split("-")[0])
+        except:
+            return 9999
+
+    def plot_group_counts(counts, set_name):
+        difficulties = ["easy", "moderate", "hard"]
+        grouped = {diff: {} for diff in difficulties}
+        for key, count in counts.items():
+            parts = key.split("_")
+            if len(parts) < 5:
+                continue
+            bucket = parts[2]
+            difficulty = parts[3]
+            if difficulty in difficulties:
+                grouped[difficulty][bucket] = grouped[difficulty].get(bucket, 0) + count
+        for diff in difficulties:
+            buckets = sorted(grouped[diff].keys(), key=bucket_key)
+            counts_list = [grouped[diff][b] for b in buckets]
+            plt.figure()
+            plt.bar(buckets, counts_list)
+            plt.xlabel("Distance Bucket")
+            plt.ylabel("GT Count")
+            plt.title(f"{set_name} {diff.capitalize()} - GT Count")
+            plt.savefig(f"{set_name.lower()}_{diff.lower()}_bar.png")
+            plt.close()
+
+    plot_group_counts(counts_train, "Train")
+    plot_group_counts(counts_val, "Val")
     
 if __name__ == "__main__":
     main()
